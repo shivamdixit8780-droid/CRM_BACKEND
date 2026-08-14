@@ -1,30 +1,30 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const customerSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-  },
-  email: {
-    type: String,
-  },
-  phone: {
-    type: String,
-  },
-  address: {
-    type: String,
-  },
-  source: {
-    type: String,
-  },
-  assignedTo: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-  },
-  convertedFromLead: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Lead',   // kis lead se ye customer bana, uska reference rakhna
-  },
-}, { timestamps: true });
+const customerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, default: "" },
+    phone: { type: String, default: "" },
+    address: { type: String, default: "" },
+    pincode: { type: String, default: "" },
+    city: { type: String, default: "" },
+    state: { type: String, default: "" },
+    product: { type: String, default: "" },
+    totalAmount: { type: Number, default: 0 },
+    orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: false },
+    leadCode: { type: String, default: "" },
+    source: { type: String, default: "Order" },
 
-module.exports = mongoose.model('Customer', customerSchema);
+    // ✅ NEW: User tracking - kaunsa user ne banaya
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+  },
+  { timestamps: true }
+);
+
+const Customer = mongoose.model("Customer", customerSchema);
+
+module.exports = Customer;

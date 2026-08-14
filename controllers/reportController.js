@@ -6,102 +6,133 @@ const getReports = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
 
+    // Date range setup
     let from, to;
-
     if (startDate && endDate) {
       from = new Date(startDate);
       to = new Date(endDate);
       to.setHours(23, 59, 59, 999);
     } else {
-      // default: current month
       const now = new Date();
       from = new Date(now.getFullYear(), now.getMonth(), 1);
       to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
     }
-
     const dateFilter = { createdAt: { $gte: from, $lte: to } };
 
-    // agar sales role hai, to sirf apna data dikhega; admin/manager sabka
-    const roleFilter = req.user.role === 'sales' ? { assignedTo: req.user._id } : {};
+    // ✅ Alag alag filters banao (kyunki fields different hain)
+    const leadFilter = req.user.role === 'sales' 
+      ? { assignedTo: req.user._id }        // Lead mein assignedTo
+      : {};
 
-    // Total Leads (is range mein bane hue)
-    const totalLeads = await Lead.countDocuments({ ...dateFilter, ...roleFilter });
+    const orderFilter = req.user.role === 'sales' 
+      ? { createdBy: req.user._id }         // ✅ Order mein createdBy
+      : {};
 
-    // Converted Leads (Sales count)
-    const convertedLeads = await Lead.countDocuments({ ...dateFilter, ...roleFilter, status: 'Converted' });
+    const customerFilter = req.user.role === 'sales' 
+      ? { createdBy: req.user._id }         // ✅ Customer mein createdBy
+      : {};
 
-    // Total Orders
-    const totalOrders = await Order.countDocuments({ ...dateFilter, ...roleFilter });
+    // 1. Total Leads
+    const totalLeads = await Lead.countDocuments({ ...dateFilter, ...leadFilter });
 
-    // Revenue — Orders ke amount ka sum
-    const revenueResult = await Order.aggregate([
-      { $match: { ...dateFilter, ...roleFilter } },
-      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
+    // 2. Converted Leads
+    const convertedLeads = await Lead.countDocuments({ 
+      ...dateFilter, 
+      ...leadFilter, 
+      status: 'Converted' 
+    });
+
+    // 3. Total Orders
+    const totalOrders = await Order.countDocuments({ ...dateFilter, ...orderFilter });
+
+    // ✅ 4. TOTAL SALES = All orders EXCEPT Cancelled
+    const totalSalesResult = await Order.aggregate([
+      {
+        $match: {
+          ...dateFilter,
+          ...orderFilter,
+          status: { $ne: "Cancelled" }
+        }
+      },
+      { $group: { _id: null, totalSales: { $sum: "$amount" } } }
     ]);
-    const revenue = revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
-    // Monthly Revenue Trend (Last 6 Months)
+    const totalSales = totalSalesResult.length > 0 ? totalSalesResult[0].totalSales : 0;
 
+    // ✅ 5. REVENUE = Delivered Orders + Customers
+    const deliveredOrdersRevenue = await Order.aggregate([
+      {
+        $match: {
+          ...dateFilter,
+          ...orderFilter,
+          status: "Delivered"
+        }
+      },
+      { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]);
+    const deliveredOrdersTotal = deliveredOrdersRevenue.length > 0 ? deliveredOrdersRevenue[0].total : 0;
+
+    // ✅ Customer filter add kiya
+    const customersRevenue = await Customer.aggregate([
+      { $match: { ...dateFilter, ...customerFilter } },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } }
+    ]);
+    const customersTotal = customersRevenue.length > 0 ? customersRevenue[0].total : 0;
+    const revenue = deliveredOrdersTotal + customersTotal;
+
+    // 6. Monthly Revenue Trend (Last 6 Months)
     const monthlyRevenue = [];
-
     for (let i = 5; i >= 0; i--) {
-
       const start = new Date();
       start.setMonth(start.getMonth() - i);
       start.setDate(1);
       start.setHours(0, 0, 0, 0);
-
       const end = new Date(start);
       end.setMonth(end.getMonth() + 1);
       end.setDate(0);
       end.setHours(23, 59, 59, 999);
 
-      const result = await Order.aggregate([
+      const deliveredResult = await Order.aggregate([
         {
           $match: {
             createdAt: { $gte: start, $lte: end },
-            ...roleFilter,
+            status: "Delivered",
+            ...orderFilter,     // ✅ Sahi filter
           },
         },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: "$amount" },
-          },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]);
+
+      // ✅ Customer filter add kiya
+      const customerResult = await Customer.aggregate([
+        { 
+          $match: { 
+            createdAt: { $gte: start, $lte: end },
+            ...customerFilter 
+          } 
         },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
       ]);
 
       monthlyRevenue.push({
-        month: start.toLocaleString("en-IN", {
-          month: "short",
-        }),
-        revenue: result.length ? result[0].total : 0,
+        month: start.toLocaleString("en-IN", { month: "short" }),
+        revenue: (deliveredResult.length ? deliveredResult[0].total : 0) +
+                 (customerResult.length ? customerResult[0].total : 0),
       });
-
     }
-    // Lead Status Summary
+
+    // 7. Lead Status Summary
     const leadStatus = await Lead.aggregate([
-      {
-        $match: {
-          ...dateFilter,
-          ...roleFilter,
-        },
-      },
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
-        },
-      },
+      { $match: { ...dateFilter, ...leadFilter } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
     ]);
-    // Recent Activities
+
+    // 8. Recent Activities
     const recentActivities = [];
 
-    // Recent Leads
-    const recentLeads = await Lead.find(roleFilter)
+    const recentLeads = await Lead.find(leadFilter)   // ✅ Filter add
       .sort({ createdAt: -1 })
       .limit(5)
       .select("name createdAt");
-
     recentLeads.forEach((lead) => {
       recentActivities.push({
         type: "Lead",
@@ -110,12 +141,10 @@ const getReports = async (req, res) => {
       });
     });
 
-    // Recent Customers
-    const recentCustomers = await Customer.find()
+    const recentCustomers = await Customer.find(customerFilter)  // ✅ Filter add
       .sort({ createdAt: -1 })
       .limit(5)
       .select("name createdAt");
-
     recentCustomers.forEach((customer) => {
       recentActivities.push({
         type: "Customer",
@@ -124,12 +153,10 @@ const getReports = async (req, res) => {
       });
     });
 
-    // Recent Orders
-    const recentOrders = await Order.find()
+    const recentOrders = await Order.find(orderFilter)  // ✅ Filter add
       .sort({ createdAt: -1 })
       .limit(5)
       .select("orderId createdAt");
-
     recentOrders.forEach((order) => {
       recentActivities.push({
         type: "Order",
@@ -138,25 +165,24 @@ const getReports = async (req, res) => {
       });
     });
 
-    // Sort Latest First
-    recentActivities.sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-    );
+    recentActivities.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    // Conversion Rate
-    const conversionRate = totalLeads > 0 ? ((convertedLeads / totalLeads) * 100).toFixed(2) : "0.00";
+    // 9. Conversion Rate
+    const conversionRate = totalLeads > 0 
+      ? ((convertedLeads / totalLeads) * 100).toFixed(2) 
+      : "0.00";
 
     res.status(200).json({
       totalLeads,
       totalOrders,
-      totalSales: convertedLeads,
+      totalSales,
       revenue,
+      deliveredRevenue: revenue,
       conversionRate: `${conversionRate}%`,
       monthlyRevenue,
       leadStatus,
       dateRange: { from, to },
       recentActivities,
-      
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

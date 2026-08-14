@@ -1,135 +1,180 @@
-const Order = require('../models/Order');
+const Order = require("../models/Order");
+const Customer = require("../models/Customer");
 
-// Create order
-const createOrder = async (req, res) => {
+// ✅ Get Orders - Role based filter
+exports.getOrders = async (req, res) => {
   try {
-    const { customer, amount, status, notes, assignedTo } = req.body;
+    const { startDate, endDate, status } = req.query;
+    let filter = {};
 
-    const order = await Order.create({
-      customer,
-      amount,
-      status,
-      notes,
-      assignedTo: assignedTo || req.user._id,
-    });
-
-    res.status(201).json(order);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// Get all orders — with date-range filter (default: current month)
-const getOrders = async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-
-    let from, to;
+    // ✅ Sales user - sirf apne orders
+    if (req.user.role === "sales") {
+      filter.createdBy = req.user._id;
+    }
 
     if (startDate && endDate) {
-      // agar user ne khud dates bheji hain, wahi use karo
-      from = new Date(startDate);
-      to = new Date(endDate);
-      to.setHours(23, 59, 59, 999); // poora din cover karne ke liye
-    } else {
-      // default: current month ka pehla aur aakhri din
-      const now = new Date();
-      from = new Date(now.getFullYear(), now.getMonth(), 1);
-      to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+      filter.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(new Date(endDate).setHours(23, 59, 59, 999)),
+      };
     }
 
-    const dateFilter = { createdAt: { $gte: from, $lte: to } };
+    if (status) filter.status = status;
 
-    let orders;
-
-    if (req.user.role === 'admin' || req.user.role === 'manager') {
-      orders = await Order.find(dateFilter)
-        .populate('customer', 'name email phone')
-        .populate('assignedTo', 'name email role')
-        .sort({ createdAt: -1 });
-    } else {
-      orders = await Order.find({ ...dateFilter, assignedTo: req.user._id })
-        .populate('customer', 'name email phone')
-        .populate('assignedTo', 'name email role')
-        .sort({ createdAt: -1 });
-    }
-
-    res.status(200).json(orders);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+    const orders = await Order.find(filter).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    console.error("Get orders error:", err.message);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// Get single order
-const getOrderById = async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id)
-      .populate('customer', 'name email phone')
-      .populate('assignedTo', 'name email role');
-
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    if (req.user.role === 'sales' && order.assignedTo?._id.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    res.status(200).json(order);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// Update order
-const updateOrder = async (req, res) => {
+// ✅ Get single order - permission check
+exports.getOrderById = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
+    // Sales user sirf apna order dekh sake
+    if (
+      req.user.role === "sales" &&
+      order.createdBy?.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
-    if (req.user.role === 'sales' && order.assignedTo?.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied' });
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ✅ Create Order - createdBy already hai
+exports.createOrder = async (req, res) => {
+  try {
+    const {
+      customerName, email, phone, address, pincode,
+      city, state, product, amount, status, notes,
+    } = req.body;
+
+    const newOrder = await Order.create({
+      customerName, email, phone, address, pincode,
+      city, state, product, amount, status, notes,
+      createdBy: req.user?._id,   // ✅ Already tha
+    });
+
+    res.status(201).json(newOrder);
+  } catch (err) {
+    console.error("Create order error:", err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ✅ Update Order
+exports.updateOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = { ...req.body };
+
+    const order = await Order.findById(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // ✅ Sales user sirf apna order update kare
+    if (
+      req.user.role === "sales" &&
+      order.createdBy?.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
-    const updatedOrder = await Order.findByIdAndUpdate(req.params.id, req.body, {
+    // ✅ Jab status "Delivered" ho
+    if (updateData.status === "Delivered") {
+      try {
+        const email = updateData.email || order.email;
+        
+        // ✅ IMPORTANT: existing customer bhi user ke andar dhundo
+        const existingCustomer = email
+          ? await Customer.findOne({ 
+              email,
+              createdBy: order.createdBy   // ✅ Same user ka customer
+            })
+          : null;
+
+        if (!existingCustomer) {
+          await Customer.create({
+            name: updateData.customerName || order.customerName,
+            email: email,
+            phone: updateData.phone || order.phone,
+            address: updateData.address || order.address,
+            pincode: updateData.pincode || order.pincode,
+            city: updateData.city || order.city,
+            state: updateData.state || order.state,
+            product: updateData.product || order.product,
+            totalAmount: Number(updateData.amount || order.amount),
+            orderId: order._id,
+            leadCode: order.leadCode || "",
+            source: "Order",
+            createdBy: order.createdBy,   // ✅ IMPORTANT - user link save karo
+          });
+          console.log("✅ New Customer created from Delivered Order");
+        } else {
+          existingCustomer.totalAmount =
+            (existingCustomer.totalAmount || 0) +
+            Number(updateData.amount || order.amount);
+          if (!existingCustomer.product && (updateData.product || order.product)) {
+            existingCustomer.product = updateData.product || order.product;
+          }
+          if (!existingCustomer.leadCode && order.leadCode) {
+            existingCustomer.leadCode = order.leadCode;
+          }
+          await existingCustomer.save();
+          console.log("✅ Existing customer amount updated");
+        }
+
+        await Order.findByIdAndDelete(id);
+        console.log("🗑️ Order removed from Orders (moved to Customers)");
+
+        return res.json({
+          success: true,
+          message: "Order Delivered! Moved to Customers.",
+          moved: true,
+        });
+      } catch (cErr) {
+        console.error("⚠️ Customer create error:", cErr.message);
+        return res.status(500).json({ message: cErr.message });
+      }
+    }
+
+    // Normal update
+    const updatedOrder = await Order.findByIdAndUpdate(id, updateData, {
       new: true,
       runValidators: true,
     });
 
-    res.status(200).json(updatedOrder);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.json(updatedOrder);
+  } catch (err) {
+    console.error("❌ Update order error:", err.message);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// Delete order
-const deleteOrder = async (req, res) => {
+// ✅ Delete Order - permission check
+exports.deleteOrder = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    if (req.user.role === 'sales') {
-      return res.status(403).json({ message: 'Access denied' });
+    // Sales user sirf apna order delete kare
+    if (
+      req.user.role === "sales" &&
+      order.createdBy?.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
     await order.deleteOne();
-
-    res.status(200).json({ message: 'Order deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.json({ message: "Order deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
-};
-
-module.exports = {
-  createOrder,
-  getOrders,
-  getOrderById,
-  updateOrder,
-  deleteOrder,
 };
